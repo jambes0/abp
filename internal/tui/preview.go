@@ -105,11 +105,13 @@ func (s *previewScreen) View(w, h int) string {
 
 	pl := s.a.cfg.Find(s.id)
 	limit := 0
+	order := "oldest first"
 	if pl != nil {
 		limit = pl.Limit
+		order = pl.OrderLabel()
 	}
-	b.WriteString(sText.Render(fmt.Sprintf("%d of %d unfinished episodes (limit %d), oldest first",
-		len(s.q.Items), s.q.Unfinished, limit)) + "\n")
+	b.WriteString(sText.Render(fmt.Sprintf("%d of %d unfinished episodes (limit %d), %s",
+		len(s.q.Items), s.q.Unfinished, limit, order)) + "\n")
 	for _, wmsg := range s.q.Warnings {
 		b.WriteString(sWarn.Render("! "+trunc(wmsg, w-2)) + "\n")
 	}

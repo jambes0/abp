@@ -151,8 +151,8 @@ func (s *listScreen) View(w, h int) string {
 	pls := s.a.cfg.Playlists
 	if len(pls) == 0 {
 		msg := sTitle.Render("No playlists yet") + "\n\n" +
-			sText.Render("A smart playlist keeps itself filled with the oldest unfinished\n"+
-				"episodes from the podcasts you pick, in publish order.") + "\n\n" +
+			sText.Render("A smart playlist keeps itself filled with unfinished episodes\n"+
+				"from the podcasts you pick, in publish order (oldest or newest first).") + "\n\n" +
 			sMuted.Render("Press ") + sKey.Render("n") + sMuted.Render(" to create your first one.")
 		return "\n" + sBox.Render(msg)
 	}

@@ -24,9 +24,16 @@ const (
 	fDesc
 	fLib
 	fLimit
+	fOrder
 	fSched
 	fCustom
 )
+
+// orderOpts are the choices for the Order selector; the first is the default.
+var orderOpts = []struct{ label, value string }{
+	{"Oldest first", config.OrderOldest},
+	{"Newest first", config.OrderNewest},
+}
 
 type schedOpt struct {
 	label, expr string
@@ -42,6 +49,7 @@ type formScreen struct {
 	libIdx                    int
 	opts                      []schedOpt
 	schedIdx                  int
+	orderIdx                  int
 	focus                     int
 	err                       string
 	loading                   bool
@@ -77,6 +85,9 @@ func newForm(a *app, editID string, focusSchedule bool) *formScreen {
 		s.name.SetValue(pl.Name)
 		s.desc.SetValue(pl.Description)
 		s.limit.SetValue(strconv.Itoa(pl.Limit))
+		if pl.NewestFirst() {
+			s.orderIdx = 1
+		}
 		s.schedIdx = 0
 		if pl.Schedule != "" {
 			s.schedIdx = len(s.opts) - 1
@@ -134,7 +145,7 @@ func (s *formScreen) fields() []int {
 	if s.editID == "" {
 		f = append(f, fLib)
 	}
-	f = append(f, fLimit, fSched)
+	f = append(f, fLimit, fOrder, fSched)
 	if s.opts[s.schedIdx].custom {
 		f = append(f, fCustom)
 	}
@@ -224,6 +235,10 @@ func (s *formScreen) Update(msg tea.Msg) (screen, tea.Cmd) {
 					s.libIdx = (s.libIdx + d + n) % n
 				}
 				return s, nil
+			case fOrder:
+				n := len(orderOpts)
+				s.orderIdx = (s.orderIdx + d + n) % n
+				return s, nil
 			case fSched:
 				n := len(s.opts)
 				s.schedIdx = (s.schedIdx + d + n) % n
@@ -265,6 +280,11 @@ func (s *formScreen) save() (screen, tea.Cmd) {
 		return s, nil
 	}
 	desc := strings.TrimSpace(s.desc.Value())
+	// oldest is the default and is stored as empty, so it stays out of the YAML.
+	order := ""
+	if orderOpts[s.orderIdx].value == config.OrderNewest {
+		order = config.OrderNewest
+	}
 	// The schedule is either empty (manual), a preset's expression, or a custom
 	// expression that must pass cron validation before we accept it.
 	opt := s.opts[s.schedIdx]
@@ -283,7 +303,7 @@ func (s *formScreen) save() (screen, tea.Cmd) {
 		if pl == nil {
 			return s, pop()
 		}
-		pl.Name, pl.Description, pl.Limit, pl.Schedule = name, desc, limit, sched
+		pl.Name, pl.Description, pl.Limit, pl.Order, pl.Schedule = name, desc, limit, order, sched
 		if err := saveCfg(s.a); err != nil {
 			s.err = "Could not save: " + err.Error()
 			return s, nil
@@ -302,7 +322,7 @@ func (s *formScreen) save() (screen, tea.Cmd) {
 	id := s.a.cfg.UniqueID(name)
 	s.a.cfg.Playlists = append(s.a.cfg.Playlists, config.Playlist{
 		ID: id, Name: name, Description: desc, Library: lib.ID, LibraryName: lib.Name,
-		Limit: limit, Schedule: sched, Podcasts: []config.Podcast{},
+		Limit: limit, Order: order, Schedule: sched, Podcasts: []config.Podcast{},
 	})
 	if err := saveCfg(s.a); err != nil {
 		s.a.cfg.Remove(id)
@@ -360,6 +380,12 @@ func (s *formScreen) View(w, h int) string {
 	}
 
 	row(fLimit, "Size", s.limit.View(), "Maximum number of unfinished episodes kept in the playlist.")
+
+	orderHint := "Plays the oldest unfinished episodes first."
+	if orderOpts[s.orderIdx].value == config.OrderNewest {
+		orderHint = "Plays the newest episodes first; older ones drop off once the playlist is full."
+	}
+	row(fOrder, "Order", cycle(fOrder, orderOpts[s.orderIdx].label), orderHint)
 
 	hint := ""
 	opt := s.opts[s.schedIdx]

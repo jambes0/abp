@@ -11,7 +11,7 @@ Ever wanted a playlist of podcasts, ordered from oldest to newest, to be listene
 
 Smart playlists for [Audiobookshelf](https://www.audiobookshelf.org) podcasts, with a TUI.
 
-Pick some podcasts, set a number of episodes, and `abp` keeps a playlist filled with the **oldest unfinished episodes** across them, in publish order. When you finish an episode it drops out on the next sync and the next oldest flows in.
+Pick some podcasts, set a number of episodes, and `abp` keeps a playlist filled with **unfinished episodes** across them, in publish order. By default that is the **oldest** unfinished episodes, oldest first; each playlist can instead be set to **newest first**, which keeps the most recently published episodes. When you finish an episode it drops out on the next sync and the next one in line flows in.
 
 ## Install
 
@@ -86,6 +86,7 @@ Your playlists live in a plain, human-readable file, `~/.config/abp/config.yaml`
         library: li_abc123
         library_name: Podcasts
         limit: 25                  # most episodes the playlist will hold
+    order: oldest              # oldest (default) or newest; omit for oldest
         schedule: "*/30 * * * *"   # cron expression; empty = manual only
         podcasts:
           - id: li_def456
@@ -101,6 +102,17 @@ Your server URL and API key are kept separately, readable only by you, in `~/.lo
 | Scheduled-run output | `~/.local/share/abp/abp.log` |
 
 To use different locations, set `ABP_CONFIG` or `ABP_DATA_DIR`. `ABP_URL` and `ABP_API_KEY` override the stored credentials, which is handy with a secrets manager.
+
+## Playlist order
+
+[#playlist-order](#playlist-order)
+
+Each playlist has an **Order** setting (in the TUI: press `e` on a playlist, then change **Order** with `←`/`→`), or `order:` in `config.yaml`:
+
+- `oldest` (default): the oldest unfinished episodes, oldest first. Good for working through a backlog.
+- `newest`: the most recently published unfinished episodes, newest first. When there are more unfinished episodes than the playlist's size, the older ones are left out until newer ones are finished.
+
+Changing the order re-sorts the existing Audiobookshelf playlist in place on the next sync.
 
 ## Good to know
 

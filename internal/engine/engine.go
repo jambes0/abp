@@ -27,13 +27,14 @@ type Item struct {
 }
 
 type Queue struct {
-	Items      []Item // oldest first, truncated to the playlist limit
+	Items      []Item // in playlist order (oldest or newest first), truncated to the playlist limit
 	Unfinished int    // total unfinished episodes before truncation
 	Warnings   []string
 }
 
 // BuildQueue collects every unfinished episode of the playlist's podcasts,
-// sorts oldest -> newest by publish date and keeps the first `Limit`.
+// sorts them by publish date (oldest -> newest, or newest -> oldest when the
+// playlist's order is "newest") and keeps the first `Limit`.
 func BuildQueue(ctx context.Context, c *abp.Client, pl config.Playlist) (*Queue, error) {
 	// 1. Which episodes has the user already finished? Progress is keyed by
 	// library item (the podcast) plus episode id.
@@ -92,11 +93,17 @@ func BuildQueue(ctx context.Context, c *abp.Client, pl config.Playlist) (*Queue,
 			})
 		}
 	}
-	// 4. Oldest first. The tie-breakers (podcast, title, id) make the order fully
-	// deterministic, so two syncs with the same data never reshuffle the list.
+	// 4. Oldest first by default, or newest first when the playlist asks for it.
+	// Only the publish-date direction flips; the tie-breakers (podcast, title, id)
+	// always run the same way and make the order fully deterministic, so two syncs
+	// with the same data never reshuffle the list.
+	newest := pl.NewestFirst()
 	sort.SliceStable(all, func(i, j int) bool {
 		a, b := all[i], all[j]
 		if !a.Published.Equal(b.Published) {
+			if newest {
+				return a.Published.After(b.Published)
+			}
 			return a.Published.Before(b.Published)
 		}
 		if a.Podcast != b.Podcast {
@@ -107,7 +114,8 @@ func BuildQueue(ctx context.Context, c *abp.Client, pl config.Playlist) (*Queue,
 		}
 		return a.EpisodeID < b.EpisodeID
 	})
-	// 5. Keep only the oldest `limit` episodes; Unfinished remembers the full count.
+	// 5. Keep only the first `limit` episodes (the oldest, or the newest when
+	// newest-first); Unfinished remembers the full count.
 	q.Unfinished = len(all)
 	limit := pl.Limit
 	if limit <= 0 {

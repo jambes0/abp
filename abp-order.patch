@@ -1,0 +1,421 @@
+diff --git a/README.md b/README.md
+index 34f6c84..60597e9 100644
+--- a/README.md
++++ b/README.md
+@@ -11,7 +11,7 @@ Ever wanted a playlist of podcasts, ordered from oldest to newest, to be listene
+ 
+ Smart playlists for [Audiobookshelf](https://www.audiobookshelf.org) podcasts, with a TUI.
+ 
+-Pick some podcasts, set a number of episodes, and `abp` keeps a playlist filled with the **oldest unfinished episodes** across them, in publish order. When you finish an episode it drops out on the next sync and the next oldest flows in.
++Pick some podcasts, set a number of episodes, and `abp` keeps a playlist filled with **unfinished episodes** across them, in publish order. By default that is the **oldest** unfinished episodes, oldest first; each playlist can instead be set to **newest first**, which keeps the most recently published episodes. When you finish an episode it drops out on the next sync and the next one in line flows in.
+ 
+ ## Install
+ 
+@@ -86,6 +86,7 @@ Your playlists live in a plain, human-readable file, `~/.config/abp/config.yaml`
+         library: li_abc123
+         library_name: Podcasts
+         limit: 25                  # most episodes the playlist will hold
++    order: oldest              # oldest (default) or newest; omit for oldest
+         schedule: "*/30 * * * *"   # cron expression; empty = manual only
+         podcasts:
+           - id: li_def456
+@@ -102,6 +103,17 @@ Your server URL and API key are kept separately, readable only by you, in `~/.lo
+ 
+ To use different locations, set `ABP_CONFIG` or `ABP_DATA_DIR`. `ABP_URL` and `ABP_API_KEY` override the stored credentials, which is handy with a secrets manager.
+ 
++## Playlist order
++
++[#playlist-order](#playlist-order)
++
++Each playlist has an **Order** setting (in the TUI: press `e` on a playlist, then change **Order** with `←`/`→`), or `order:` in `config.yaml`:
++
++- `oldest` (default): the oldest unfinished episodes, oldest first. Good for working through a backlog.
++- `newest`: the most recently published unfinished episodes, newest first. When there are more unfinished episodes than the playlist's size, the older ones are left out until newer ones are finished.
++
++Changing the order re-sorts the existing Audiobookshelf playlist in place on the next sync.
++
+ ## Good to know
+ 
+ - abp owns each playlist's name and description. They are pushed to Audiobookshelf on every sync, so edits made to them in Audiobookshelf itself will be overwritten.
+diff --git a/internal/config/config.go b/internal/config/config.go
+index 0066fc8..541fcfd 100644
+--- a/internal/config/config.go
++++ b/internal/config/config.go
+@@ -19,6 +19,14 @@ import (
+ 
+ const DefaultLimit = 25
+ 
++// Playlist orderings. "oldest" (the default, and what an empty value means)
++// queues the oldest unfinished episodes first; "newest" queues the most recently
++// published unfinished episodes first.
++const (
++	OrderOldest = "oldest"
++	OrderNewest = "newest"
++)
++
+ type Podcast struct {
+ 	ID    string `yaml:"id"` // Audiobookshelf library item id
+ 	Title string `yaml:"title"`
+@@ -31,10 +39,27 @@ type Playlist struct {
+ 	Library     string    `yaml:"library"` // Audiobookshelf library id
+ 	LibraryName string    `yaml:"library_name,omitempty"`
+ 	Limit       int       `yaml:"limit"`              // max episodes in the playlist
++	Order       string    `yaml:"order,omitempty"`    // "oldest" (default) or "newest" first
+ 	Schedule    string    `yaml:"schedule,omitempty"` // cron expression; empty = manual only
+ 	Podcasts    []Podcast `yaml:"podcasts"`
+ }
+ 
++// NewestFirst reports whether the playlist queues the most recently published
++// episodes first. Anything other than "newest" means oldest first, so existing
++// configs without an order keep behaving exactly as before.
++func (p Playlist) NewestFirst() bool {
++	return strings.EqualFold(strings.TrimSpace(p.Order), OrderNewest)
++}
++
++// OrderLabel is a short human description of the playlist's ordering, e.g.
++// "oldest first", for the TUI and CLI.
++func (p Playlist) OrderLabel() string {
++	if p.NewestFirst() {
++		return "newest first"
++	}
++	return "oldest first"
++}
++
+ type Config struct {
+ 	Playlists []Playlist `yaml:"playlists"`
+ }
+@@ -76,6 +101,13 @@ func Load() (*Config, error) {
+ 		if p.ID == "" {
+ 			p.ID = Slug(p.Name)
+ 		}
++		// Normalise the order. oldest is the default, so it is stored as empty and
++		// omitted from the YAML; unknown values fall back to it.
++		if p.NewestFirst() {
++			p.Order = OrderNewest
++		} else {
++			p.Order = ""
++		}
+ 	}
+ 	return &c, nil
+ }
+diff --git a/internal/engine/engine.go b/internal/engine/engine.go
+index 204aff8..6fcf4d4 100644
+--- a/internal/engine/engine.go
++++ b/internal/engine/engine.go
+@@ -27,13 +27,14 @@ type Item struct {
+ }
+ 
+ type Queue struct {
+-	Items      []Item // oldest first, truncated to the playlist limit
++	Items      []Item // in playlist order (oldest or newest first), truncated to the playlist limit
+ 	Unfinished int    // total unfinished episodes before truncation
+ 	Warnings   []string
+ }
+ 
+ // BuildQueue collects every unfinished episode of the playlist's podcasts,
+-// sorts oldest -> newest by publish date and keeps the first `Limit`.
++// sorts them by publish date (oldest -> newest, or newest -> oldest when the
++// playlist's order is "newest") and keeps the first `Limit`.
+ func BuildQueue(ctx context.Context, c *abp.Client, pl config.Playlist) (*Queue, error) {
+ 	// 1. Which episodes has the user already finished? Progress is keyed by
+ 	// library item (the podcast) plus episode id.
+@@ -92,11 +93,17 @@ func BuildQueue(ctx context.Context, c *abp.Client, pl config.Playlist) (*Queue,
+ 			})
+ 		}
+ 	}
+-	// 4. Oldest first. The tie-breakers (podcast, title, id) make the order fully
+-	// deterministic, so two syncs with the same data never reshuffle the list.
++	// 4. Oldest first by default, or newest first when the playlist asks for it.
++	// Only the publish-date direction flips; the tie-breakers (podcast, title, id)
++	// always run the same way and make the order fully deterministic, so two syncs
++	// with the same data never reshuffle the list.
++	newest := pl.NewestFirst()
+ 	sort.SliceStable(all, func(i, j int) bool {
+ 		a, b := all[i], all[j]
+ 		if !a.Published.Equal(b.Published) {
++			if newest {
++				return a.Published.After(b.Published)
++			}
+ 			return a.Published.Before(b.Published)
+ 		}
+ 		if a.Podcast != b.Podcast {
+@@ -107,7 +114,8 @@ func BuildQueue(ctx context.Context, c *abp.Client, pl config.Playlist) (*Queue,
+ 		}
+ 		return a.EpisodeID < b.EpisodeID
+ 	})
+-	// 5. Keep only the oldest `limit` episodes; Unfinished remembers the full count.
++	// 5. Keep only the first `limit` episodes (the oldest, or the newest when
++	// newest-first); Unfinished remembers the full count.
+ 	q.Unfinished = len(all)
+ 	limit := pl.Limit
+ 	if limit <= 0 {
+diff --git a/internal/engine/order_test.go b/internal/engine/order_test.go
+new file mode 100644
+index 0000000..d09d20b
+--- /dev/null
++++ b/internal/engine/order_test.go
+@@ -0,0 +1,100 @@
++package engine
++
++import (
++	"context"
++	"strings"
++	"testing"
++
++	"github.com/projector22/abp/internal/config"
++)
++
++// queueIDs renders a queue's episode ids in order, e.g. "a3,b2,a2".
++func queueIDs(q *Queue) string {
++	var s []string
++	for _, it := range q.Items {
++		s = append(s, it.EpisodeID)
++	}
++	return strings.Join(s, ",")
++}
++
++// TestBuildQueueOrder checks both playlist orderings against the fake server's
++// episodes (a1=1000, b1=2000, a2=3000, b2=4000, a3=5000):
++//   - the default and an explicit "oldest" queue oldest first and keep the oldest
++//     `limit` episodes,
++//   - "newest" queues newest first and keeps the newest `limit` episodes,
++//   - finished episodes are skipped in both directions,
++//   - Unfinished always reports the full count before truncation.
++func TestBuildQueueOrder(t *testing.T) {
++	pods := []config.Podcast{{ID: "podA"}, {ID: "podB"}}
++
++	tests := []struct {
++		name     string
++		order    string
++		limit    int
++		finished map[string]bool
++		want     string
++		total    int
++	}{
++		{"default is oldest first", "", 25, nil, "a1,b1,a2,b2,a3", 5},
++		{"explicit oldest", config.OrderOldest, 25, nil, "a1,b1,a2,b2,a3", 5},
++		{"oldest keeps the oldest", config.OrderOldest, 3, nil, "a1,b1,a2", 5},
++		{"newest first", config.OrderNewest, 25, nil, "a3,b2,a2,b1,a1", 5},
++		{"newest keeps the newest", config.OrderNewest, 3, nil, "a3,b2,a2", 5},
++		{"newest skips finished", config.OrderNewest, 25, map[string]bool{"podA/a3": true}, "b2,a2,b1,a1", 4},
++		{"oldest skips finished", config.OrderOldest, 25, map[string]bool{"podA/a1": true}, "b1,a2,b2,a3", 4},
++		{"order is case-insensitive", "Newest", 2, nil, "a3,b2", 5},
++		{"unknown order falls back to oldest", "sideways", 2, nil, "a1,b1", 5},
++	}
++	for _, tc := range tests {
++		t.Run(tc.name, func(t *testing.T) {
++			fin := tc.finished
++			if fin == nil {
++				fin = map[string]bool{}
++			}
++			f := &fakeABS{finished: fin}
++			c, _ := newEnv(t, f, f.handler())
++			pl := config.Playlist{ID: "x", Limit: tc.limit, Order: tc.order, Podcasts: pods}
++			q, err := BuildQueue(context.Background(), c, pl)
++			if err != nil {
++				t.Fatal(err)
++			}
++			if got := queueIDs(q); got != tc.want {
++				t.Errorf("order %q limit %d: got %s, want %s", tc.order, tc.limit, got, tc.want)
++			}
++			if q.Unfinished != tc.total {
++				t.Errorf("Unfinished = %d, want %d", q.Unfinished, tc.total)
++			}
++		})
++	}
++}
++
++// TestRunNewestFirstReordersExistingPlaylist checks that switching a playlist
++// from oldest to newest is applied to the same server playlist in place (no
++// delete/recreate), and that the server ends up holding the newest-first order.
++func TestRunNewestFirstReordersExistingPlaylist(t *testing.T) {
++	f := &fakeABS{finished: map[string]bool{}}
++	c, st := newEnv(t, f, f.handler())
++	ctx := context.Background()
++
++	pl := config.Playlist{
++		ID: "x", Name: "X", Library: "lib", Limit: 25,
++		Podcasts: []config.Podcast{{ID: "podA"}, {ID: "podB"}},
++	}
++	if _, err := Run(ctx, c, pl, st, false); err != nil {
++		t.Fatal(err)
++	}
++	if got := ids(f.pl.sorted()); got != "a1,b1,a2,b2,a3" {
++		t.Fatalf("oldest-first playlist = %s", got)
++	}
++
++	pl.Order = config.OrderNewest
++	if _, err := Run(ctx, c, pl, st, false); err != nil {
++		t.Fatal(err)
++	}
++	if got := ids(f.pl.sorted()); got != "a3,b2,a2,b1,a1" {
++		t.Errorf("newest-first playlist = %s", got)
++	}
++	if f.creates != 1 {
++		t.Errorf("playlist was recreated: %d creates, want 1", f.creates)
++	}
++}
+diff --git a/internal/tui/detail.go b/internal/tui/detail.go
+index 2f18ff5..1d88199 100644
+--- a/internal/tui/detail.go
++++ b/internal/tui/detail.go
+@@ -167,7 +167,7 @@ func (s *detailScreen) View(w, h int) string {
+ 		b.WriteString(label("About") + sText.Render(trunc(pl.Description, w-12)) + "\n")
+ 	}
+ 	b.WriteString(label("Library") + sText.Render(lib) + "\n")
+-	b.WriteString(label("Size") + sText.Render(fmt.Sprintf("up to %d unfinished episodes, oldest first", pl.Limit)) + "\n")
++	b.WriteString(label("Size") + sText.Render(fmt.Sprintf("up to %d unfinished episodes, %s", pl.Limit, pl.OrderLabel())) + "\n")
+ 	b.WriteString(label("Schedule") + sched + "\n")
+ 	b.WriteString(label("Last sync") + last + "\n")
+ 	if lastRun != "" {
+diff --git a/internal/tui/form.go b/internal/tui/form.go
+index 63ec8a7..680d9c7 100644
+--- a/internal/tui/form.go
++++ b/internal/tui/form.go
+@@ -24,10 +24,17 @@ const (
+ 	fDesc
+ 	fLib
+ 	fLimit
++	fOrder
+ 	fSched
+ 	fCustom
+ )
+ 
++// orderOpts are the choices for the Order selector; the first is the default.
++var orderOpts = []struct{ label, value string }{
++	{"Oldest first", config.OrderOldest},
++	{"Newest first", config.OrderNewest},
++}
++
+ type schedOpt struct {
+ 	label, expr string
+ 	custom      bool
+@@ -42,6 +49,7 @@ type formScreen struct {
+ 	libIdx                    int
+ 	opts                      []schedOpt
+ 	schedIdx                  int
++	orderIdx                  int
+ 	focus                     int
+ 	err                       string
+ 	loading                   bool
+@@ -77,6 +85,9 @@ func newForm(a *app, editID string, focusSchedule bool) *formScreen {
+ 		s.name.SetValue(pl.Name)
+ 		s.desc.SetValue(pl.Description)
+ 		s.limit.SetValue(strconv.Itoa(pl.Limit))
++		if pl.NewestFirst() {
++			s.orderIdx = 1
++		}
+ 		s.schedIdx = 0
+ 		if pl.Schedule != "" {
+ 			s.schedIdx = len(s.opts) - 1
+@@ -134,7 +145,7 @@ func (s *formScreen) fields() []int {
+ 	if s.editID == "" {
+ 		f = append(f, fLib)
+ 	}
+-	f = append(f, fLimit, fSched)
++	f = append(f, fLimit, fOrder, fSched)
+ 	if s.opts[s.schedIdx].custom {
+ 		f = append(f, fCustom)
+ 	}
+@@ -224,6 +235,10 @@ func (s *formScreen) Update(msg tea.Msg) (screen, tea.Cmd) {
+ 					s.libIdx = (s.libIdx + d + n) % n
+ 				}
+ 				return s, nil
++			case fOrder:
++				n := len(orderOpts)
++				s.orderIdx = (s.orderIdx + d + n) % n
++				return s, nil
+ 			case fSched:
+ 				n := len(s.opts)
+ 				s.schedIdx = (s.schedIdx + d + n) % n
+@@ -265,6 +280,11 @@ func (s *formScreen) save() (screen, tea.Cmd) {
+ 		return s, nil
+ 	}
+ 	desc := strings.TrimSpace(s.desc.Value())
++	// oldest is the default and is stored as empty, so it stays out of the YAML.
++	order := ""
++	if orderOpts[s.orderIdx].value == config.OrderNewest {
++		order = config.OrderNewest
++	}
+ 	// The schedule is either empty (manual), a preset's expression, or a custom
+ 	// expression that must pass cron validation before we accept it.
+ 	opt := s.opts[s.schedIdx]
+@@ -283,7 +303,7 @@ func (s *formScreen) save() (screen, tea.Cmd) {
+ 		if pl == nil {
+ 			return s, pop()
+ 		}
+-		pl.Name, pl.Description, pl.Limit, pl.Schedule = name, desc, limit, sched
++		pl.Name, pl.Description, pl.Limit, pl.Order, pl.Schedule = name, desc, limit, order, sched
+ 		if err := saveCfg(s.a); err != nil {
+ 			s.err = "Could not save: " + err.Error()
+ 			return s, nil
+@@ -302,7 +322,7 @@ func (s *formScreen) save() (screen, tea.Cmd) {
+ 	id := s.a.cfg.UniqueID(name)
+ 	s.a.cfg.Playlists = append(s.a.cfg.Playlists, config.Playlist{
+ 		ID: id, Name: name, Description: desc, Library: lib.ID, LibraryName: lib.Name,
+-		Limit: limit, Schedule: sched, Podcasts: []config.Podcast{},
++		Limit: limit, Order: order, Schedule: sched, Podcasts: []config.Podcast{},
+ 	})
+ 	if err := saveCfg(s.a); err != nil {
+ 		s.a.cfg.Remove(id)
+@@ -361,6 +381,12 @@ func (s *formScreen) View(w, h int) string {
+ 
+ 	row(fLimit, "Size", s.limit.View(), "Maximum number of unfinished episodes kept in the playlist.")
+ 
++	orderHint := "Plays the oldest unfinished episodes first."
++	if orderOpts[s.orderIdx].value == config.OrderNewest {
++		orderHint = "Plays the newest episodes first; older ones drop off once the playlist is full."
++	}
++	row(fOrder, "Order", cycle(fOrder, orderOpts[s.orderIdx].label), orderHint)
++
+ 	hint := ""
+ 	opt := s.opts[s.schedIdx]
+ 	if opt.expr != "" {
+diff --git a/internal/tui/list.go b/internal/tui/list.go
+index 9a38c2f..bbe8775 100644
+--- a/internal/tui/list.go
++++ b/internal/tui/list.go
+@@ -151,8 +151,8 @@ func (s *listScreen) View(w, h int) string {
+ 	pls := s.a.cfg.Playlists
+ 	if len(pls) == 0 {
+ 		msg := sTitle.Render("No playlists yet") + "\n\n" +
+-			sText.Render("A smart playlist keeps itself filled with the oldest unfinished\n"+
+-				"episodes from the podcasts you pick, in publish order.") + "\n\n" +
++			sText.Render("A smart playlist keeps itself filled with unfinished episodes\n"+
++				"from the podcasts you pick, in publish order (oldest or newest first).") + "\n\n" +
+ 			sMuted.Render("Press ") + sKey.Render("n") + sMuted.Render(" to create your first one.")
+ 		return "\n" + sBox.Render(msg)
+ 	}
+diff --git a/internal/tui/preview.go b/internal/tui/preview.go
+index 61ba4fe..9191cc9 100644
+--- a/internal/tui/preview.go
++++ b/internal/tui/preview.go
+@@ -105,11 +105,13 @@ func (s *previewScreen) View(w, h int) string {
+ 
+ 	pl := s.a.cfg.Find(s.id)
+ 	limit := 0
++	order := "oldest first"
+ 	if pl != nil {
+ 		limit = pl.Limit
++		order = pl.OrderLabel()
+ 	}
+-	b.WriteString(sText.Render(fmt.Sprintf("%d of %d unfinished episodes (limit %d), oldest first",
+-		len(s.q.Items), s.q.Unfinished, limit)) + "\n")
++	b.WriteString(sText.Render(fmt.Sprintf("%d of %d unfinished episodes (limit %d), %s",
++		len(s.q.Items), s.q.Unfinished, limit, order)) + "\n")
+ 	for _, wmsg := range s.q.Warnings {
+ 		b.WriteString(sWarn.Render("! "+trunc(wmsg, w-2)) + "\n")
+ 	}
+diff --git a/main.go b/main.go
+index 418f992..c8e17c2 100644
+--- a/main.go
++++ b/main.go
+@@ -179,7 +179,7 @@ func cmdList() {
+ 		if p.Schedule != "" {
+ 			sched = p.Schedule
+ 		}
+-		fmt.Printf("%-24s %3d eps  %2d podcasts  %s\n", p.ID, p.Limit, len(p.Podcasts), sched)
++		fmt.Printf("%-24s %3d eps  %-12s %2d podcasts  %s\n", p.ID, p.Limit, p.OrderLabel(), len(p.Podcasts), sched)
+ 	}
+ }
+ 

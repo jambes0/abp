@@ -179,7 +179,7 @@ func cmdList() {
 		if p.Schedule != "" {
 			sched = p.Schedule
 		}
-		fmt.Printf("%-24s %3d eps  %2d podcasts  %s\n", p.ID, p.Limit, len(p.Podcasts), sched)
+		fmt.Printf("%-24s %3d eps  %-12s %2d podcasts  %s\n", p.ID, p.Limit, p.OrderLabel(), len(p.Podcasts), sched)
 	}
 }
 

@@ -167,7 +167,7 @@ func (s *detailScreen) View(w, h int) string {
 		b.WriteString(label("About") + sText.Render(trunc(pl.Description, w-12)) + "\n")
 	}
 	b.WriteString(label("Library") + sText.Render(lib) + "\n")
-	b.WriteString(label("Size") + sText.Render(fmt.Sprintf("up to %d unfinished episodes, oldest first", pl.Limit)) + "\n")
+	b.WriteString(label("Size") + sText.Render(fmt.Sprintf("up to %d unfinished episodes, %s", pl.Limit, pl.OrderLabel())) + "\n")
 	b.WriteString(label("Schedule") + sched + "\n")
 	b.WriteString(label("Last sync") + last + "\n")
 	if lastRun != "" {

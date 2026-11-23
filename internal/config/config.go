@@ -19,6 +19,14 @@ import (
 
 const DefaultLimit = 25
 
+// Playlist orderings. "oldest" (the default, and what an empty value means)
+// queues the oldest unfinished episodes first; "newest" queues the most recently
+// published unfinished episodes first.
+const (
+	OrderOldest = "oldest"
+	OrderNewest = "newest"
+)
+
 type Podcast struct {
 	ID    string `yaml:"id"` // Audiobookshelf library item id
 	Title string `yaml:"title"`
@@ -31,8 +39,25 @@ type Playlist struct {
 	Library     string    `yaml:"library"` // Audiobookshelf library id
 	LibraryName string    `yaml:"library_name,omitempty"`
 	Limit       int       `yaml:"limit"`              // max episodes in the playlist
+	Order       string    `yaml:"order,omitempty"`    // "oldest" (default) or "newest" first
 	Schedule    string    `yaml:"schedule,omitempty"` // cron expression; empty = manual only
 	Podcasts    []Podcast `yaml:"podcasts"`
+}
+
+// NewestFirst reports whether the playlist queues the most recently published
+// episodes first. Anything other than "newest" means oldest first, so existing
+// configs without an order keep behaving exactly as before.
+func (p Playlist) NewestFirst() bool {
+	return strings.EqualFold(strings.TrimSpace(p.Order), OrderNewest)
+}
+
+// OrderLabel is a short human description of the playlist's ordering, e.g.
+// "oldest first", for the TUI and CLI.
+func (p Playlist) OrderLabel() string {
+	if p.NewestFirst() {
+		return "newest first"
+	}
+	return "oldest first"
 }
 
 type Config struct {
@@ -75,6 +100,13 @@ func Load() (*Config, error) {
 		}
 		if p.ID == "" {
 			p.ID = Slug(p.Name)
+		}
+		// Normalise the order. oldest is the default, so it is stored as empty and
+		// omitted from the YAML; unknown values fall back to it.
+		if p.NewestFirst() {
+			p.Order = OrderNewest
+		} else {
+			p.Order = ""
 		}
 	}
 	return &c, nil
